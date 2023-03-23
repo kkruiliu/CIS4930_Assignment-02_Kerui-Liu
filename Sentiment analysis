@@ -34,7 +34,7 @@ print("\nMissing values in the testing dataset:")
 print(test_df.isnull().sum())
 
 # use a smaller subset of the dataset
-train_sample_size = 15000  # speed up running time
+train_sample_size = 20000  # speed up running time
 test_sample_size = 359     # adjust the value anytime
 
 train_df = train_df.sample(train_sample_size, random_state=42).reset_index(drop=True)
