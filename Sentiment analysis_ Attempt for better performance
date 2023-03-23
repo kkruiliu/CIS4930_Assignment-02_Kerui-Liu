@@ -6,12 +6,13 @@ from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import GridSearchCV
 from sklearn.svm import SVC
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from gensim.models import Word2Vec
+from sklearn.model_selection import GridSearchCV
 
 # Step 1: Load and explore data
 train_df = pd.read_csv('C:/Users/15988/Downloads/train.csv')
@@ -33,7 +34,7 @@ print(train_df.isnull().sum())
 print("\nMissing values in the testing dataset:")
 print(test_df.isnull().sum())
 # use a smaller subset of the dataset
-train_sample_size = 10000  # speed up running time
+train_sample_size = 15000  # speed up running time
 test_sample_size = 359     # adjust the value anytime
 
 train_df = train_df.sample(train_sample_size, random_state=42).reset_index(drop=True)
@@ -52,11 +53,11 @@ def preprocess(text):
     text = re.sub(r'\w+:\/{2}[\d\w-]+(\.[\d\w-]+)*(?:(?:\/[^\s/]*))*', '', text)
     text = re.sub(r'\W', ' ', text)
     text = re.sub(r'\d', ' ', text)
-    text = re.sub(r'\b(?:not|isn\'t|aren\'t|wasn\'t|weren\'t|haven\'t|hasn\'t|hadn\'t|don\'t|doesn\'t|didn\'t|won\'t|wouldn\'t|shan\'t|shouldn\'t|can\'t|cannot|couldn\'t|mustn\'t|mightn\'t|mayn\'t)\b', 'not', text)
     words = nltk.word_tokenize(text)
     words = [lemmatizer.lemmatize(word) for word in words if word not in stop_words]
     text = ' '.join(words)
     return text
+
 train_df['Text'] = train_df['Text'].apply(preprocess)
 test_df['Text'] = test_df['Text'].apply(preprocess)
 
@@ -68,43 +69,96 @@ y_train = train_df['Sentiment']
 X_test = vectorizer.transform(test_df['Text'])
 y_test = test_df['Sentiment']
 
+# Step 3.1: Bag-of-words feature extraction
+bow_vectorizer = CountVectorizer(ngram_range=(1, 2))
+X_train_bow = bow_vectorizer.fit_transform(train_df['Text'])
+X_test_bow = bow_vectorizer.transform(test_df['Text'])
+
+# Step 3.2: TF-IDF feature extraction
+tfidf_vectorizer = TfidfVectorizer(ngram_range=(1, 2))
+X_train_tfidf = tfidf_vectorizer.fit_transform(train_df['Text'])
+X_test_tfidf = tfidf_vectorizer.transform(test_df['Text'])
+
+# Step 3.3: Word2Vec feature extraction
+def tokenize(text):
+    return nltk.word_tokenize(text)
+
+
+train_tokenized = train_df['Text'].apply(tokenize)
+test_tokenized = test_df['Text'].apply(tokenize)
+
+word2vec = Word2Vec(train_tokenized, vector_size=100, window=5, min_count=1, workers=4)
+word2vec.train(train_tokenized, total_examples=len(train_tokenized), epochs=10)
+
+
+def get_word2vec_features(words, model):
+    word_vectors = [model.wv[word] for word in words if word in model.wv]
+
+    if not word_vectors:
+        return np.zeros(model.vector_size)
+
+    return np.mean(word_vectors, axis=0)
+
+X_train_w2v = np.vstack(train_tokenized.apply(lambda x: get_word2vec_features(x, word2vec)))
+X_test_w2v = np.vstack(test_tokenized.apply(lambda x: get_word2vec_features(x, word2vec)))
+
 # Step 4: Build sentiment classification models
-scaler = StandardScaler(with_mean=False)
-X_train_scaled = scaler.fit_transform(X_train)
-X_test_scaled = scaler.transform(X_test)
+scaler_bow = StandardScaler(with_mean=False)
+X_train_bow_scaled = scaler_bow.fit_transform(X_train_bow)
+X_test_bow_scaled = scaler_bow.transform(X_test_bow)
 
-# Logistic Regression (with hyperparameter tuning)
-param_grid_lr = {'C': [0.1, 1, 10], 'solver': ['lbfgs', 'liblinear', 'sag']}
-logistic_regression = GridSearchCV(LogisticRegression(max_iter=5000), param_grid_lr, cv=5)
-logistic_regression.fit(X_train_scaled, y_train)
+scaler_tfidf = StandardScaler(with_mean=False)
+X_train_tfidf_scaled = scaler_tfidf.fit_transform(X_train_tfidf)
+X_test_tfidf_scaled = scaler_tfidf.transform(X_test_tfidf)
 
-# SVM (with hyperparameter tuning)
-param_grid_svm = {'C': [0.1, 1, 10], 'kernel': ['linear', 'rbf']}
-svm = GridSearchCV(SVC(), param_grid_svm, cv=5)
-svm.fit(X_train_scaled, y_train)
+scaler_w2v = StandardScaler()
+X_train_w2v_scaled = scaler_w2v.fit_transform(X_train_w2v)
+X_test_w2v_scaled = scaler_w2v.transform(X_test_w2v)
 
-# Naive Bayes
-naive_bayes = MultinomialNB()
-naive_bayes.fit(X_train, y_train)
-
-# Random Forest (with hyperparameter tuning)
-param_grid_rf = {'n_estimators': [100, 200, 300], 'criterion': ['gini', 'entropy'], 'max_depth': [None, 10, 20]}
-random_forest = GridSearchCV(RandomForestClassifier(), param_grid_rf, cv=5)
-random_forest.fit(X_train, y_train)
 
 # Step 5: Model evaluation
-models = {
-    'Logistic Regression': logistic_regression,
-    'SVM': svm,
-    'Naive Bayes': naive_bayes,
-    'Random Forest': random_forest
-}
-
-for name, model in models.items():
-    y_pred = model.predict(X_test_scaled if name != 'Naive Bayes' else X_test)
+def evaluate_model(model, X_train, y_train, X_test, y_test, model_name, feature_name):
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
     accuracy = accuracy_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred)
-    precision = precision_score(y_test, y_pred)
-    recall = recall_score(y_test, y_pred)
-    print(f'{name}:')
-    print(f'Accuracy: {accuracy:.4f}, F1: {f1:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}\n')
+    precision = precision_score(y_test, y_pred, average='weighted')
+    recall = recall_score(y_test, y_pred, average='weighted')
+    f1 = f1_score(y_test, y_pred, average='weighted')
+
+    print(f"Model: {model_name}, Feature: {feature_name}")
+    print(f"Accuracy: {accuracy:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall: {recall:.4f}")
+    print(f"F1 Score: {f1:.4f}\n")
+
+
+# Hyperparameter tuning for Logistic Regression and Random Forest
+log_reg_params = {'C': [0.001, 0.01, 0.1, 1, 10, 100]}
+random_forest_params = {'n_estimators': [100, 200, 300], 'max_depth': [10, 30, 50]}
+
+log_reg_grid = GridSearchCV(LogisticRegression(max_iter=1000), log_reg_params, scoring='f1_weighted', n_jobs=-1, cv=5)
+random_forest_grid = GridSearchCV(RandomForestClassifier(), random_forest_params, scoring='f1_weighted', n_jobs=-1,
+                                  cv=5)
+
+# Evaluate models
+for feature, X_train_data, X_test_data in [('Bag-of-Words', X_train_bow_scaled, X_test_bow_scaled),
+                                           ('TF-IDF', X_train_tfidf_scaled, X_test_tfidf_scaled),
+                                           ('Word2Vec', X_train_w2v_scaled, X_test_w2v_scaled)]:
+    # Logistic Regression
+    log_reg_grid.fit(X_train_data, y_train)
+    best_log_reg = log_reg_grid.best_estimator_
+    evaluate_model(best_log_reg, X_train_data, y_train, X_test_data, y_test, 'Logistic Regression', feature)
+
+    # SVM
+    svm = SVC(kernel='linear', C=1, probability=True)
+    evaluate_model(svm, X_train_data, y_train, X_test_data, y_test, 'SVM', feature)
+
+    # Multinomial Naive Bayes
+    if feature != 'Word2Vec':  # MultinomialNB is not applicable for negative values
+        mnb = MultinomialNB()
+        evaluate_model(mnb, X_train_data, y_train, X_test_data, y_test, 'Multinomial Naive Bayes', feature)
+
+    # Random Forest
+    random_forest_grid.fit(X_train_data, y_train)
+    best_random_forest = random_forest_grid.best_estimator_
+    evaluate_model(best_random_forest, X_train_data, y_train, X_test_data, y_test, 'Random Forest', feature)
